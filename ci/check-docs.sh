@@ -5,4 +5,4 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-npx prettier --check '**/*.md'
+npx --no-install prettier --check '**/*.md'
