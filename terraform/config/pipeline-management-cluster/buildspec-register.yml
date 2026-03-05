@@ -57,7 +57,6 @@ phases:
         fi
 
         # Resolve RC state key from regional config (RC alias != MC alias)
-        ENVIRONMENT="${ENVIRONMENT:-staging}"
         RC_CONFIG_FILE="deploy/${ENVIRONMENT}/${TARGET_REGION}/terraform/regional.json"
         if [ ! -f "$RC_CONFIG_FILE" ]; then
             echo "ERROR: Regional cluster config not found: $RC_CONFIG_FILE"
