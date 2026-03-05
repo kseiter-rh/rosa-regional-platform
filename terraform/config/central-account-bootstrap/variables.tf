@@ -17,6 +17,12 @@ variable "github_branch" {
   default     = "main"
 }
 
+variable "name_prefix" {
+  type        = string
+  description = "Optional prefix for resource names (e.g., CI run hash for parallel e2e runs)"
+  default     = ""
+}
+
 # =============================================================================
 # AWS Configuration
 # =============================================================================

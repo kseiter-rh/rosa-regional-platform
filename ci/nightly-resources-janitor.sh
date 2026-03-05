@@ -16,7 +16,7 @@ DRY_RUN=false
 export AWS_PAGER=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CREDS_DIR="/var/run/rosa-credentials"
+CREDS_DIR="/tmp/rosa-credentials"
 PURGE_SCRIPT="${SCRIPT_DIR}/janitor/purge-aws-account.sh"
 
 PURGE_ARGS=()
