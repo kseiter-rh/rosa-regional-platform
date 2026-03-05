@@ -108,7 +108,6 @@ phases:
 artifacts:
   files:
     - '**/*'
-    - terraform/config/regional-cluster/outputs.json
   exclude-paths:
     - '**/.terraform/**'
     - '**/.terraform.lock.hcl'
