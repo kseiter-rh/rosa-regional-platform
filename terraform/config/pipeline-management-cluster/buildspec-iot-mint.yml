@@ -71,3 +71,5 @@ phases:
 artifacts:
   files:
     - '**/*'
+  exclude-paths:
+    - '**/.terraform/**'
