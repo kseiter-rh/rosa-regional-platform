@@ -5,6 +5,7 @@ env:
 
 phases:
   build:
+    on-failure: RETRY-1
     commands:
       - echo "=========================================="
       - echo "Minting IoT Certificate in RC Account"
@@ -73,3 +74,5 @@ artifacts:
     - '**/*'
   exclude-paths:
     - '**/.terraform/**'
+    - '**/.terraform.lock.hcl'
+    - '**/node_modules/**'

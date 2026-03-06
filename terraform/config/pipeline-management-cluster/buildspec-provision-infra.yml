@@ -5,6 +5,7 @@ env:
 
 phases:
   build:
+    on-failure: RETRY-1
     commands:
       - echo "=========================================="
       - echo "Provisioning Management Cluster Infrastructure"
@@ -156,3 +157,5 @@ artifacts:
     - '**/*'
   exclude-paths:
     - '**/.terraform/**'
+    - '**/.terraform.lock.hcl'
+    - '**/node_modules/**'
