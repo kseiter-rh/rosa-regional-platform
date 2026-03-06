@@ -66,7 +66,7 @@ if [ ! -f "$RC_CONFIG_FILE" ]; then
     echo "ERROR: Regional cluster config not found: $RC_CONFIG_FILE"
     exit 1
 fi
-RC_ALIAS=$(jq -r '.alias // .region_alias' "$RC_CONFIG_FILE")
+RC_ALIAS=$(jq -r '.regional_id' "$RC_CONFIG_FILE")
 echo "Resolved RC alias from config: $RC_ALIAS"
 
 # Assume RC account to read terraform outputs and call API
