@@ -1,7 +1,9 @@
 import logging
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 PROVISION_TIMEOUT = 3600  # seconds (1 hour); total time for provisioning
 TEARDOWN_TIMEOUT = 3600  # seconds (1 hour); total time for teardown
@@ -10,6 +12,7 @@ import yaml
 
 from . import TARGET_ENVIRONMENT
 from .aws import AWSCredentials
+from .codebuild_logs import download_codebuild_logs
 from .git import GitManager
 from .pipeline import PipelineMonitor
 
@@ -76,12 +79,42 @@ class EphemeralEnvOrchestrator:
         """
         self._setup_aws()
 
+        # Collect CodeBuild logs before teardown destroys infrastructure.
+        # In Prow, teardown runs as a separate step — this captures logs
+        # from the provisioning phase that would otherwise be lost.
+        self.collect_codebuild_logs()
+
         git = GitManager(self.creds_dir, self.repo, self.branch)
         self.git = git
         git.checkout_ci_branch(self.ci_prefix)
 
         self.monitor = PipelineMonitor(self.aws.session)
         self._run_teardown(git)
+
+    def collect_codebuild_logs(self):
+        """Download CloudWatch logs for all CodeBuild projects matching our CI prefix.
+
+        Writes each log group to a separate file in ARTIFACT_DIR (set by Prow)
+        so they appear in the Prow artifacts UI. Sensitive values (AWS keys,
+        session tokens) are redacted before writing.
+        """
+        artifact_dir = os.environ.get("ARTIFACT_DIR")
+        if not artifact_dir:
+            log.warning("ARTIFACT_DIR not set — skipping CodeBuild log collection")
+            return
+
+        if not self.aws or not self.aws.session:
+            log.warning("AWS session not available — skipping log collection")
+            return
+
+        artifact_path = Path(artifact_dir) / "codebuild-logs"
+        files = download_codebuild_logs(self.aws.session, self.ci_prefix, artifact_path)
+
+        # Redact sensitive values (AWS keys, session tokens) from Prow artifacts
+        for f in files:
+            content = f.read_text()
+            content = _redact_sensitive(content)
+            f.write_text(content)
 
     def _setup_aws(self):
         """Set up AWS credentials and trust policies."""
@@ -206,6 +239,7 @@ class EphemeralEnvOrchestrator:
                 failed += 1
 
         if failed > 0:
+            self.collect_codebuild_logs()
             raise RuntimeError(f"{failed} pipeline(s) failed during provisioning.")
 
         log.info("All pipelines completed successfully.")
@@ -347,3 +381,17 @@ class EphemeralEnvOrchestrator:
                 f"Terraform teardown timed out after {TEARDOWN_TIMEOUT}s"
             )
         log.info("Pipeline-provisioner destroyed.")
+
+
+# Patterns that match AWS secrets we don't want in Prow artifacts
+_SENSITIVE_PATTERNS = [
+    (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{16}"), "[REDACTED_AWS_KEY]"),
+    (re.compile(r"(?i)(aws_secret_access_key|secret_key)\s*[=:]\s*\S+"), r"\1=[REDACTED]"),
+    (re.compile(r"(?i)(aws_session_token|security_token)\s*[=:]\s*\S+"), r"\1=[REDACTED]"),
+]
+
+
+def _redact_sensitive(text: str) -> str:
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
