@@ -96,6 +96,22 @@ class AWSCredentials:
         )
         return sts.get_caller_identity()["Account"]
 
+    def target_subprocess_env(self, prefix: str) -> dict[str, str]:
+        """Build a subprocess environment dict with target account credentials.
+
+        Args:
+            prefix: Account prefix ('regional' or 'management') used to find credentials.
+
+        Returns:
+            Dict with AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_DEFAULT_REGION.
+        """
+        return {
+            "AWS_ACCESS_KEY_ID": self._read_credential(f"{prefix}_access_key"),
+            "AWS_SECRET_ACCESS_KEY": self._read_credential(f"{prefix}_secret_key"),
+            "AWS_DEFAULT_REGION": self.region,
+            "AWS_REGION": self.region,
+        }
+
     def setup_target_account_trust(self, prefix: str):
         """Set up trust policy in a sub-account.
 
