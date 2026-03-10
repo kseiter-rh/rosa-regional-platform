@@ -1,15 +1,15 @@
 #!/bin/bash
 # Run e2e API tests from rosa-regional-platform-api against the provisioned environment.
-# Expects SHARED_DIR/api-url to exist (written by nightly.sh during provisioning).
+# Expects SHARED_DIR/terraform-outputs.json to exist (written by pre-merge.py --save-state).
 
 set -euo pipefail
 
-API_URL_FILE="${SHARED_DIR}/api-url"
-if [[ ! -r "${API_URL_FILE}" ]]; then
-  echo "ERROR: ${API_URL_FILE} does not exist or is not readable" >&2
+TF_OUTPUTS="${SHARED_DIR}/terraform-outputs.json"
+if [[ ! -r "${TF_OUTPUTS}" ]]; then
+  echo "ERROR: ${TF_OUTPUTS} does not exist or is not readable" >&2
   exit 1
 fi
-BASE_URL="$(cat "${API_URL_FILE}")"
+BASE_URL="$(jq -r '.api_gateway_invoke_url.value' "${TF_OUTPUTS}")"
 export BASE_URL
 echo "Running API e2e tests against ${BASE_URL}"
 

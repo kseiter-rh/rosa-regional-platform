@@ -52,8 +52,12 @@ class EphemeralEnvOrchestrator:
         self.monitor: PipelineMonitor | None = None
         self.git: GitManager | None = None
 
-    def provision(self):
-        """Provision the ephemeral environment (setup + bootstrap + wait for pipelines)."""
+    def provision(self, save_state: str | None = None):
+        """Provision the ephemeral environment (setup + bootstrap + wait for pipelines).
+
+        Args:
+            save_state: If set, save terraform outputs JSON to this path after provisioning.
+        """
         self._setup_aws()
 
         git = GitManager(self.creds_dir, self.repo, self.branch)
@@ -70,6 +74,9 @@ class EphemeralEnvOrchestrator:
 
         # Wait for provisioning pipelines
         self._wait_for_provision()
+
+        if save_state:
+            self._save_terraform_outputs(git, save_state)
 
     def teardown(self):
         """Tear down a previously provisioned ephemeral environment.
@@ -243,6 +250,56 @@ class EphemeralEnvOrchestrator:
             raise RuntimeError(f"{failed} pipeline(s) failed during provisioning.")
 
         log.info("All pipelines completed successfully.")
+
+    def _save_terraform_outputs(self, git: GitManager, dest: str):
+        """Fetch RC terraform outputs and write them to a file.
+
+        Connects to the regional-cluster remote state in the RC account's
+        S3 bucket and runs ``terraform output --json``.
+        """
+        log.info("")
+        log.info("==========================================")
+        log.info("Saving Terraform Outputs")
+        log.info("==========================================")
+
+        regional_account_id = self.aws.get_target_account_id("regional")
+        state_bucket = f"terraform-state-{regional_account_id}"
+        state_key = f"regional-cluster/{self.ci_prefix}-regional.tfstate"
+        tf_dir = git.work_dir / "terraform" / "config" / "regional-cluster"
+
+        env = os.environ.copy()
+        env.update(self.aws.target_subprocess_env("regional"))
+
+        log.info("State bucket: %s  key: %s", state_bucket, state_key)
+
+        subprocess.run(
+            [
+                "terraform", "init", "-reconfigure",
+                f"-backend-config=bucket={state_bucket}",
+                f"-backend-config=key={state_key}",
+                f"-backend-config=region={self.region}",
+                "-backend-config=use_lockfile=true",
+            ],
+            cwd=tf_dir,
+            env=env,
+            check=True,
+            timeout=120,
+        )
+
+        result = subprocess.run(
+            ["terraform", "output", "--json"],
+            cwd=tf_dir,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )
+
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text(result.stdout)
+        log.info("Terraform outputs written to %s", dest)
 
     def _run_teardown(self, git: GitManager):
         """Tear down infrastructure via GitOps and destroy the pipeline-provisioner."""

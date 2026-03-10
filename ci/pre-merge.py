@@ -86,6 +86,11 @@ def main():
         default=os.environ.get("AWS_REGION", "us-east-1"),
         help="AWS region (default: us-east-1)",
     )
+    parser.add_argument(
+        "--save-state",
+        metavar="PATH",
+        help="Save RC terraform outputs (JSON) to PATH after provisioning",
+    )
     args = parser.parse_args()
 
     # Normalize repo format (strip github.com prefix and .git suffix if present)
@@ -115,7 +120,7 @@ def main():
             log.info("Teardown completed successfully!")
             log.info("==========================================")
         else:
-            env.provision()
+            env.provision(save_state=args.save_state)
             log.info("")
             log.info("==========================================")
             log.info("Provisioning completed successfully!")
