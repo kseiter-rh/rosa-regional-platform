@@ -16,7 +16,11 @@ else
     echo "ERROR: ${TF_OUTPUTS} does not exist or is not readable" >&2
     exit 1
   fi
-  BASE_URL="$(jq -r '.api_gateway_invoke_url.value' "${TF_OUTPUTS}")"
+  BASE_URL="$(jq -r '.api_gateway_invoke_url.value // empty' "${TF_OUTPUTS}")"
+  if [[ -z "${BASE_URL}" ]]; then
+    echo "ERROR: api_gateway_invoke_url.value not found in ${TF_OUTPUTS}" >&2
+    exit 1
+  fi
 fi
 export BASE_URL
 echo "Running API e2e tests against ${BASE_URL}"
