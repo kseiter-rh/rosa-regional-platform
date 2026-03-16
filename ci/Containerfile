@@ -21,7 +21,12 @@ RUN dnf install -y \
         gnupg2 \
         openssl \
         golang \
+        nodejs \
+        npm \
     && dnf clean all
+
+# Prettier (for markdown doc checks)
+RUN npm install -g prettier
 
 # Terraform (GPG-verified)
 RUN arch=$(uname -m) && \
