@@ -105,8 +105,8 @@ docs/
 
 #### For New Regions
 
-1. Add region config to Git repository
-2. Run `make ephemeral-provision` to provision a development environment
+1. Add region config to `config/environments/` and render with `uv run scripts/render.py`
+2. Bootstrap the central pipeline (see `docs/environment-provisioning.md`)
 3. ArgoCD bootstrap handles core service deployment
 4. Management Clusters auto-provision as needed
 
