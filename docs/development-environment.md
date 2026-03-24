@@ -13,12 +13,73 @@ Each environment gets a unique ID that prefixes all provisioned resources, keepi
 make ephemeral-provision
 
 # Explicit — skip the picker
-make ephemeral-provision REPO=owner/repo BRANCH=my-feature REGION=us-east-1
+make ephemeral-provision REPO=owner/repo BRANCH=my-feature
 ```
 
 On success the command prints the environment ID as well as guidance to interact with the environment.
 
+The region is derived from the environment config (see [Customizing Your Environment](#customizing-your-environment)). By default it provisions in `us-east-1`.
+
 To view and interact with provisioned environments at a later point in time, see [List Environments](#list-environments).
+
+## Customizing Your Environment
+
+By default, ephemeral environments use the preset in `config/ephemeral/` (bastion enabled, single MC in `us-east-1`). You can replace this config entirely for your local development by creating a `.ephemeral-env/` directory in the repo root.
+
+### Structure
+
+The `.ephemeral-env/` directory must mirror the `config/<env>/` structure:
+
+```
+.ephemeral-env/
+├── defaults.yaml        # Environment-level defaults (optional)
+└── us-east-1.yaml       # Region config (exactly one region file required)
+```
+
+This directory is gitignored — it only affects your local machine.
+
+### Constraints
+
+- Exactly **one region file** (besides `defaults.yaml`) must exist — the ephemeral provisioner deploys to a single region.
+- The region file must define **`provision_mcs`** with at most **one management cluster** (only one MC account is available in the shared dev setup).
+- AWS account IDs are injected automatically from credentials — do not set `aws.account_id` or `aws.management_cluster_account_id`.
+
+### Examples
+
+Use default topology but enable bastion and change instance types:
+
+```yaml
+# .ephemeral-env/defaults.yaml
+regional_cluster:
+  enable_bastion: true
+  node_instance_types: ["m5.xlarge"]
+
+management_cluster_defaults:
+  enable_bastion: true
+  node_instance_types: ["m5.xlarge"]
+```
+
+```yaml
+# .ephemeral-env/us-east-1.yaml
+provision_mcs:
+  mc01: {}
+```
+
+Provision in a different region:
+
+```yaml
+# .ephemeral-env/us-east-2.yaml
+provision_mcs:
+  mc01: {}
+```
+
+### Applying Changes
+
+Overrides are applied during `provision` and `resync`. To update a running environment after editing `.ephemeral-env/`:
+
+```bash
+make ephemeral-resync ID=<id>
+```
 
 ## List Environments
 
@@ -87,6 +148,8 @@ make ephemeral-e2e ID=6bd2d3d7
 ## Resync
 
 The ephemeral environment runs from an ephemeral-provider managed clone of your branch. If you push additional changes to your remote branch after provisioning (e.g. updating a Helm chart or Terraform module), the environment won't pick them up automatically — you need to resync so the cloned branch is updated and ArgoCD syncs the changes.
+
+Resync also re-applies the environment config, so changes to `.ephemeral-env/` are picked up alongside code changes.
 
 ```bash
 # Interactive — fzf picker for environment selection

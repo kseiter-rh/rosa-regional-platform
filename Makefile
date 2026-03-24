@@ -176,7 +176,6 @@ VAULT_CRED_KEYS := central_access_key central_secret_key central_assume_role_arn
 
 REPO ?= openshift-online/rosa-regional-platform
 BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD)
-REGION = us-east-1
 
 # Helper: update STATE for a BUILD_ID in .ephemeral-envs (portable, no sed -i)
 # Usage: $(call update-state,BUILD_ID,NEW_STATE)
@@ -223,7 +222,8 @@ echo "Fetching credentials from Vault (OIDC login)..."; _VAULT_TOKEN=$$(VAULT_AD
 endef
 
 # Provision an ephemeral environment
-# Usage: make ephemeral-provision [REPO=owner/repo] [BRANCH=branch] [REGION=region] [ID=id]
+# Region is derived from the environment config (config/ephemeral/ or .ephemeral-env/).
+# Usage: make ephemeral-provision [REPO=owner/repo] [BRANCH=branch] [ID=id]
 ephemeral-provision: ephemeral-image
 	$(eval ID ?= $(shell python3 -c "import uuid; print(uuid.uuid4().hex[:8])"))
 	@# FZF remote + branch picker when BRANCH is not explicitly passed
@@ -242,33 +242,47 @@ ephemeral-provision: ephemeral-image
 			{ echo "Aborted."; exit 1; }; \
 		echo "Selected branch: $$_BRANCH (from $$_remote)"; \
 	fi; \
+	_OVERRIDE_MOUNT=""; \
+	_OVERRIDE_INFO="(default)"; \
+	if [ -d "$(PWD)/.ephemeral-env" ]; then \
+		_OVERRIDE_MOUNT="-v $(PWD)/.ephemeral-env:/overrides:ro,z -e EPHEMERAL_OVERRIDE_DIR=/overrides"; \
+		_OVERRIDE_INFO=".ephemeral-env/"; \
+	fi; \
 	$(fetch-creds); \
 	echo "Provisioning ephemeral environment..."; \
 	echo "  ID:                $(ID)"; \
 	echo "  REPO:              $$_REPO"; \
 	echo "  BRANCH:            $$_BRANCH"; \
-	echo "  REGION:            $(REGION)"; \
+	echo "  ENV CONFIG:        $$_OVERRIDE_INFO"; \
 	echo "  CONTAINER_ENGINE:  $(CONTAINER_ENGINE)"; \
 	echo "  IMAGE:             $(EPHEMERAL_CI_IMAGE)"; \
-	echo "$(ID) REPO=$$_REPO BRANCH=$$_BRANCH REGION=$(REGION) STATE=provisioning CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $(EPHEMERAL_ENVS_FILE); \
+	echo "$(ID) REPO=$$_REPO BRANCH=$$_BRANCH STATE=provisioning CREATED=$$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $(EPHEMERAL_ENVS_FILE); \
 	_tmpdir=$$(mktemp -d); \
 	trap 'rm -rf "$$_tmpdir"' EXIT; \
 	$(CONTAINER_ENGINE) run --rm \
 		$$_CRED_FLAGS \
+		$$_OVERRIDE_MOUNT \
 		-v $(PWD):/workspace:ro,z \
 		-v $$_tmpdir:/output:z \
 		-w /workspace \
 		-e BUILD_ID=$(ID) \
-		-e AWS_REGION=$(REGION) \
+		-e WORKSPACE_DIR=/workspace \
 		$(EPHEMERAL_CI_IMAGE) \
-		uv run --no-cache ci/ephemeral-provider/main.py --repo $$_REPO --branch $$_BRANCH --region $(REGION) --save-regional-state /output/tf-outputs.json; \
+		uv run --no-cache ci/ephemeral-provider/main.py --repo $$_REPO --branch $$_BRANCH --save-regional-state /output/tf-outputs.json; \
 	rc=$$?; \
 	if [ $$rc -eq 0 ]; then \
 		_API_URL=""; \
+		_REGION=""; \
 		if [ -f "$$_tmpdir/tf-outputs.json" ] && command -v jq >/dev/null 2>&1; then \
 			_API_URL=$$(jq -r '.api_gateway_invoke_url.value // empty' "$$_tmpdir/tf-outputs.json" 2>/dev/null || true); \
 		fi; \
+		if [ -f "$$_tmpdir/region" ]; then \
+			_REGION=$$(cat "$$_tmpdir/region"); \
+		fi; \
 		$(call update-state,$(ID),ready); \
+		if [ -n "$$_REGION" ]; then \
+			sed "s|^$(ID) .*|& REGION=$$_REGION|" $(EPHEMERAL_ENVS_FILE) > $(EPHEMERAL_ENVS_FILE).tmp && mv $(EPHEMERAL_ENVS_FILE).tmp $(EPHEMERAL_ENVS_FILE); \
+		fi; \
 		if [ -n "$$_API_URL" ]; then \
 			sed "s|^$(ID) .*|& API_URL=$$_API_URL|" $(EPHEMERAL_ENVS_FILE) > $(EPHEMERAL_ENVS_FILE).tmp && mv $(EPHEMERAL_ENVS_FILE).tmp $(EPHEMERAL_ENVS_FILE); \
 		fi; \
@@ -332,9 +346,9 @@ ephemeral-teardown: ephemeral-image
 		-v $(PWD):/workspace:ro,z \
 		-w /workspace \
 		-e BUILD_ID=$$_BUILD_ID \
-		-e AWS_REGION=$$_REGION \
+		-e WORKSPACE_DIR=/workspace \
 		$(EPHEMERAL_CI_IMAGE) \
-		uv run --no-cache ci/ephemeral-provider/main.py --teardown --repo $$_REPO --branch $$_BRANCH --region $$_REGION; \
+		uv run --no-cache ci/ephemeral-provider/main.py --teardown --repo $$_REPO --branch $$_BRANCH; \
 	rc=$$?; \
 	if [ $$rc -eq 0 ]; then \
 		grep -v "^$$_BUILD_ID " $(EPHEMERAL_ENVS_FILE) > $(EPHEMERAL_ENVS_FILE).tmp; grep "^$$_BUILD_ID " $(EPHEMERAL_ENVS_FILE) | sed 's/STATE=[^ ]*/STATE=deprovisioned/' >> $(EPHEMERAL_ENVS_FILE).tmp; mv $(EPHEMERAL_ENVS_FILE).tmp $(EPHEMERAL_ENVS_FILE); \
@@ -345,7 +359,7 @@ ephemeral-teardown: ephemeral-image
 		exit $$rc; \
 	fi
 
-# Resync an ephemeral environment's CI branch onto latest source branch
+# Resync an ephemeral environment's CI branch and re-inject environment config
 # Usage: make ephemeral-resync [ID=<id>]
 ephemeral-resync: ephemeral-image
 	@if [ "$(origin ID)" = "command line" ]; then \
@@ -369,21 +383,29 @@ ephemeral-resync: ephemeral-image
 		{ echo "ID $$_BUILD_ID not found in $(EPHEMERAL_ENVS_FILE)."; exit 1; }; \
 	_REPO=$$(echo "$$_line" | sed -n 's/.*REPO=\([^ ]*\).*/\1/p'); \
 	_BRANCH=$$(echo "$$_line" | sed -n 's/.*BRANCH=\([^ ]*\).*/\1/p'); \
-	_REGION=$$(echo "$$_line" | sed -n 's/.*REGION=\([^ ]*\).*/\1/p'); \
+	_OVERRIDE_MOUNT=""; \
+	_OVERRIDE_INFO="(default)"; \
+	if [ -d "$(PWD)/.ephemeral-env" ]; then \
+		_OVERRIDE_MOUNT="-v $(PWD)/.ephemeral-env:/overrides:ro,z -e EPHEMERAL_OVERRIDE_DIR=/overrides"; \
+		_OVERRIDE_INFO=".ephemeral-env/"; \
+	fi; \
 	$(fetch-creds); \
-	echo "Resyncing ephemeral environment CI branch..."; \
+	echo "Resyncing ephemeral environment..."; \
 	echo "  ID:                $$_BUILD_ID"; \
 	echo "  REPO:              $$_REPO"; \
 	echo "  BRANCH:            $$_BRANCH"; \
+	echo "  ENV CONFIG:        $$_OVERRIDE_INFO"; \
 	echo "  CONTAINER_ENGINE:  $(CONTAINER_ENGINE)"; \
 	echo "  IMAGE:             $(EPHEMERAL_CI_IMAGE)"; \
 	$(CONTAINER_ENGINE) run --rm \
 		$$_CRED_FLAGS \
+		$$_OVERRIDE_MOUNT \
 		-v $(PWD):/workspace:ro,z \
 		-w /workspace \
 		-e BUILD_ID=$$_BUILD_ID \
+		-e WORKSPACE_DIR=/workspace \
 		$(EPHEMERAL_CI_IMAGE) \
-		uv run --no-cache ci/ephemeral-provider/main.py --resync --repo $$_REPO --branch $$_BRANCH --region $$_REGION; \
+		uv run --no-cache ci/ephemeral-provider/main.py --resync --repo $$_REPO --branch $$_BRANCH; \
 	rc=$$?; \
 	if [ $$rc -ne 0 ]; then \
 		echo "Resync failed."; \
