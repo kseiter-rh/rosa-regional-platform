@@ -105,7 +105,7 @@ select_env() {
 fzf_pick() {
   local header="$1"
   shift
-  printf '%s\n' "$@" | fzf --height=10 --layout=reverse --header="$header" --no-info
+  printf '%s\n' "$@" | fzf --multi --height=10 --layout=reverse --header="$header" --no-info
 }
 
 # Check if .ephemeral-env/ override directory exists.
@@ -604,68 +604,72 @@ cmd_bastion_port_forward() {
     # --- Validations ------------------------
     validate_cluster_type $cluster_type
 
-    local service
+    local services
     if [ "$cluster_type" = "regional" ]; then
-        service=$(fzf_pick "Select service (${cluster_type}):" \
+        services=$(fzf_pick "Select service (${cluster_type}):" \
         "maestro   - Maestro HTTP + gRPC" \
         "argocd    - ArgoCD server HTTPS" \
         "custom    - Custom service / ports")
     else
-        service=$(fzf_pick "Select service (${cluster_type}):" \
+        services=$(fzf_pick "Select service (${cluster_type}):" \
         "argocd      - ArgoCD server HTTPS" \
         "prometheus  - Prometheus Monitoring Dashboard" \
         "custom      - Custom service / ports")
     fi
-    service="${service%%[[:space:]]*}"
-
-    case "$service" in
-    maestro|argocd|prometheus|custom) ;;
-    *) echo "Error: unknown service '$service'"; echo ""; usage; exit 1 ;;
-    esac
-
-    if [ "$service" = "maestro" ] && [ "$cluster_type" != "regional" ]; then
-      echo "Error: maestro is only available on regional clusters."
-      exit 1
-    fi
-
-    # ── Build port-forward definitions ───────────────────────────────────────────
-    # Each entry: "label remote_port local_port k8s_svc k8s_namespace k8s_svc_port"
+    services=$(echo "$services" | cut -d' ' -f1)
 
     local forwards
+    forwards=()
 
-    case "$service" in
-    maestro)
-        forwards=(
-        "Maestro-HTTP 8080 8080 maestro-http maestro-server 8080"
-        "Maestro-gRPC 8090 8090 maestro-grpc maestro-server 8090"
-        )
-        ;;
-    argocd)
-        forwards=(
-        "ArgoCD-Server 8443 8443 argocd-server argocd 443"
-        )
-        ;;
-    prometheus)
-        forwards=(
-        "Prometheus 9090 9090 monitoring-prometheus monitoring 9090"
-        )
-        ;;
-    custom)
-        local k8s_ns k8s_svc k8s_svc_port local_port remote_port
-        echo ""
-        read -rp "Kubernetes namespace: " k8s_ns
-        read -rp "Service name (without svc/ prefix): " k8s_svc
-        read -rp "Service port [443]: " k8s_svc_port
-        k8s_svc_port="${k8s_svc_port:-443}"
-        read -rp "Local port [${k8s_svc_port}]: " local_port
-        local_port="${local_port:-$k8s_svc_port}"
-        remote_port="$local_port"
+    for service in $services
+    do
+        case "$service" in
+        maestro|argocd|prometheus|custom) ;;
+        *) echo "Error: unknown service '$service'"; echo ""; usage; exit 1 ;;
+        esac
 
-        forwards=(
-        "Custom ${remote_port} ${local_port} ${k8s_svc} ${k8s_ns} ${k8s_svc_port}"
-        )
-        ;;
-    esac
+        if [ "$service" = "maestro" ] && [ "$cluster_type" != "regional" ]; then
+        echo "Error: maestro is only available on regional clusters."
+        exit 1
+        fi
+
+        # ── Build port-forward definitions ───────────────────────────────────────────
+        # Each entry: "label remote_port local_port k8s_svc k8s_namespace k8s_svc_port"
+
+        case "$service" in
+        maestro)
+            forwards+=(
+            "Maestro-HTTP 8080 8080 maestro-http maestro-server 8080"
+            "Maestro-gRPC 8090 8090 maestro-grpc maestro-server 8090"
+            )
+            ;;
+        argocd)
+            forwards+=(
+            "ArgoCD-Server 8443 8443 argocd-server argocd 443"
+            )
+            ;;
+        prometheus)
+            forwards+=(
+            "Prometheus 9090 9090 monitoring-prometheus monitoring 9090"
+            )
+            ;;
+        custom)
+            local k8s_ns k8s_svc k8s_svc_port local_port remote_port
+            echo ""
+            read -rp "Kubernetes namespace: " k8s_ns
+            read -rp "Service name (without svc/ prefix): " k8s_svc
+            read -rp "Service port [443]: " k8s_svc_port
+            k8s_svc_port="${k8s_svc_port:-443}"
+            read -rp "Local port [${k8s_svc_port}]: " local_port
+            local_port="${local_port:-$k8s_svc_port}"
+            remote_port="$local_port"
+
+            forwards+=(
+            "Custom ${remote_port} ${local_port} ${k8s_svc} ${k8s_ns} ${k8s_svc_port}"
+            )
+            ;;
+        esac
+    done
 
     # ── Pre-flight: check local ports are free ───────────────────────────────────
 
@@ -764,7 +768,7 @@ cmd_bastion_port_forward() {
     echo "==> Port forwarding active. Forwarded ports:"
     for entry in "${forwards[@]}"; do
         read -r label _ local_port _ _ _ <<< "$entry"
-        echo "    ${label}: localhost:${local_port}"
+        echo "    ${label}: http://localhost:${local_port}"
     done
 
     # For ArgoCD, fetch and display the admin password from the bastion.
