@@ -1,4 +1,4 @@
-.PHONY: help terraform-fmt terraform-init terraform-validate terraform-upgrade terraform-output-management terraform-output-regional helm-lint check-rendered-files ephemeral-provision ephemeral-teardown ephemeral-resync ephemeral-list ephemeral-shell ephemeral-bastion-rc ephemeral-bastion-mc ephemeral-e2e check-docs pre-push
+.PHONY: help terraform-fmt terraform-init terraform-validate terraform-upgrade terraform-output-management terraform-output-regional helm-lint check-rendered-files ephemeral-provision ephemeral-teardown ephemeral-resync ephemeral-list ephemeral-shell ephemeral-bastion-rc ephemeral-bastion-mc ephemeral-port-forward-rc ephemeral-port-forward-mc ephemeral-e2e check-docs pre-push
 
 # Default target
 help:
@@ -23,6 +23,8 @@ help:
 	@echo "  ephemeral-shell                       - Interactive shell for Platform API access"
 	@echo "  ephemeral-bastion-rc                  - Connect to RC bastion in an ephemeral env"
 	@echo "  ephemeral-bastion-mc                  - Connect to MC bastion in an ephemeral env"
+	@echo "  ephemeral-port-forward-rc             - Create a port-forward session to RC service in an ephemeral env"
+	@echo "  ephemeral-port-forward-mc             - Create a port-forward session to MC service in an ephemeral env"
 	@echo "  ephemeral-e2e                         - Run e2e tests against an ephemeral env"
 	@echo ""
 	@echo "  help                                  - Show this help message"
@@ -191,6 +193,11 @@ ephemeral-bastion-rc:
 ephemeral-bastion-mc:
 	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh bastion management
 
+ephemeral-port-forward-rc:
+	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward regional
+
+ephemeral-port-forward-mc:
+	@ID="$(ID)" ./scripts/dev/ephemeral-env.sh port-forward management
+
 ephemeral-e2e:
 	@ID="$(ID)" API_REF="$(or $(API_REF),main)" ./scripts/dev/ephemeral-env.sh e2e
-

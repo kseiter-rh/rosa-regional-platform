@@ -88,6 +88,12 @@ select_env() {
         || die "ID $BUILD_ID not found in $ENVS_FILE."
 }
 
+fzf_pick() {
+  local header="$1"
+  shift
+  printf '%s\n' "$@" | fzf --height=10 --layout=reverse --header="$header" --no-info
+}
+
 # Check if .ephemeral-env/ override directory exists.
 # Sets global: OVERRIDE_MOUNT (container flags), OVERRIDE_INFO (display string)
 setup_override_mount() {
@@ -135,6 +141,136 @@ fetch_creds() {
     done
 
     echo "Credentials loaded (in-memory only)."
+}
+
+# Initial bastion connectivity and setup
+bastion_setup() {
+    local cluster_type="${1:-}"
+
+    # Validate cluster type
+    case "$cluster_type" in
+        regional|management) ;;
+        *) die "Usage: $0 bastion <regional|management>" ;;
+    esac
+
+    # Select environment (ready only)
+    select_env "STATE=ready" \
+        "Select environment for bastion access:" \
+        "No ready environments found."
+
+    local region
+    region=$(get_field "$ENV_LINE" REGION)
+    [[ -n "$region" ]] \
+        || die "No REGION found for ID $BUILD_ID. Was it captured during provision?"
+
+    # Compute ci_prefix from BUILD_ID (must match ci/ephemeral-provider/main.py)
+    local ci_prefix
+    ci_prefix="ci-$(echo -n "$BUILD_ID" | shasum -a 256 | cut -c1-6)"
+
+    # Derive cluster ID and ECS resource names from ci_prefix
+    if [[ "$cluster_type" == "regional" ]]; then
+        cluster_id="${ci_prefix}-regional"
+    else
+        cluster_id="${ci_prefix}-mc01"
+    fi
+    export ecs_cluster="${cluster_id}-bastion"
+
+    # Fetch credentials from Vault
+    fetch_creds
+
+    # Select the right credentials for the target account
+    local target_ak target_sk
+    if [[ "$cluster_type" == "regional" ]]; then
+        target_ak="$REGIONAL_AK"
+        target_sk="$REGIONAL_SK"
+    else
+        target_ak="$MANAGEMENT_AK"
+        target_sk="$MANAGEMENT_SK"
+    fi
+
+    echo "Connecting to ephemeral bastion..."
+    echo "  ID:           $BUILD_ID"
+    echo "  CI prefix:    $ci_prefix"
+    echo "  Cluster type: $cluster_type"
+    echo "  Cluster ID:   $cluster_id"
+    echo "  ECS cluster:  $ecs_cluster"
+    echo "  Region:       $region"
+    echo ""
+
+    export AWS_ACCESS_KEY_ID="$target_ak"
+    export AWS_SECRET_ACCESS_KEY="$target_sk"
+    export AWS_DEFAULT_REGION="$region"
+    export AWS_REGION="$region"
+
+    # Check for an existing running task
+    echo "==> Checking for running bastion tasks..."
+    local existing_task
+    existing_task=$(aws ecs list-tasks --cluster "$ecs_cluster" \
+        --desired-status RUNNING --query 'taskArns[0]' --output text 2>/dev/null || true)
+
+    if [[ -n "$existing_task" && "$existing_task" != "None" ]]; then
+        export task_id=$(echo "$existing_task" | awk -F'/' '{print $NF}')
+        echo "==> Found existing running task: $task_id"
+    else
+        echo "==> No running task found, starting a new one..."
+
+        # Discover task definition, subnets, and security group from AWS
+        local task_def="${cluster_id}-bastion"
+        local sg_id subnets
+
+        sg_id=$(aws ec2 describe-security-groups \
+            --filters "Name=group-name,Values=${cluster_id}-bastion" \
+            --query 'SecurityGroups[0].GroupId' --output text) \
+            || die "Could not find security group '${cluster_id}-bastion'."
+        [[ "$sg_id" != "None" ]] \
+            || die "Security group '${cluster_id}-bastion' not found."
+
+        # Find private subnets tagged for the cluster's VPC
+        local vpc_id
+        vpc_id=$(aws ec2 describe-security-groups \
+            --group-ids "$sg_id" \
+            --query 'SecurityGroups[0].VpcId' --output text)
+
+        subnets=$(aws ec2 describe-subnets \
+            --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:Name,Values=*private*" \
+            --query 'Subnets[].SubnetId' --output text \
+            | tr '\t' ',') \
+            || die "Could not find private subnets in VPC $vpc_id."
+
+        echo "    Task def:  $task_def"
+        echo "    SG:        $sg_id"
+        echo "    Subnets:   $subnets"
+
+        AWS_PAGER="" aws ecs run-task \
+            --cluster "$ecs_cluster" \
+            --task-definition "$task_def" \
+            --launch-type FARGATE \
+            --enable-execute-command \
+            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$sg_id],assignPublicIp=DISABLED}" \
+            > /dev/null
+
+        export task_id=$(aws ecs list-tasks --cluster "$ecs_cluster" \
+            --query 'taskArns[0]' --output text | awk -F'/' '{print $NF}')
+    fi
+
+    # Wait for task to be running
+    echo "==> Waiting for task to be running..."
+    aws ecs wait tasks-running --cluster "$ecs_cluster" --tasks "$task_id"
+
+    # Wait for the ECS exec agent to be ready
+    echo "==> Waiting for execute command agent..."
+    local agent_status=""
+    for i in $(seq 1 30); do
+        agent_status=$(aws ecs describe-tasks \
+            --cluster "$ecs_cluster" --tasks "$task_id" --output json \
+            | jq -r '.tasks[0].containers[] | select(.name=="bastion") | .managedAgents[] | select(.name=="ExecuteCommandAgent") | .lastStatus' 2>/dev/null || true)
+        if [[ "$agent_status" == "RUNNING" ]]; then
+            break
+        fi
+        sleep 2
+    done
+    [[ "$agent_status" == "RUNNING" ]] \
+        || die "Execute command agent did not become ready (status: ${agent_status:-unknown})"
 }
 
 # Build the CI container image if not already present.
@@ -422,136 +558,11 @@ cmd_shell() {
             exec bash'
 }
 
-cmd_bastion() {
-    local cluster_type="${1:-}"
+cmd_bastion_interactive() {
+    bastion_setup $1
 
-    # Validate cluster type
-    case "$cluster_type" in
-        regional|management) ;;
-        *) die "Usage: $0 bastion <regional|management>" ;;
-    esac
-
-    # Select environment (ready only)
-    select_env "STATE=ready" \
-        "Select environment for bastion access:" \
-        "No ready environments found."
-
-    local region
-    region=$(get_field "$ENV_LINE" REGION)
-    [[ -n "$region" ]] \
-        || die "No REGION found for ID $BUILD_ID. Was it captured during provision?"
-
-    # Compute ci_prefix from BUILD_ID (must match ci/ephemeral-provider/main.py)
-    local ci_prefix
-    ci_prefix="ci-$(echo -n "$BUILD_ID" | shasum -a 256 | cut -c1-6)"
-
-    # Derive cluster ID and ECS resource names from ci_prefix
-    local cluster_id
-    if [[ "$cluster_type" == "regional" ]]; then
-        cluster_id="${ci_prefix}-regional"
-    else
-        cluster_id="${ci_prefix}-mc01"
-    fi
-    local ecs_cluster="${cluster_id}-bastion"
-
-    # Fetch credentials from Vault
-    fetch_creds
-
-    # Select the right credentials for the target account
-    local target_ak target_sk
-    if [[ "$cluster_type" == "regional" ]]; then
-        target_ak="$REGIONAL_AK"
-        target_sk="$REGIONAL_SK"
-    else
-        target_ak="$MANAGEMENT_AK"
-        target_sk="$MANAGEMENT_SK"
-    fi
-
-    echo "Connecting to ephemeral bastion..."
-    echo "  ID:           $BUILD_ID"
-    echo "  CI prefix:    $ci_prefix"
-    echo "  Cluster type: $cluster_type"
-    echo "  Cluster ID:   $cluster_id"
-    echo "  ECS cluster:  $ecs_cluster"
-    echo "  Region:       $region"
-    echo ""
-
-    export AWS_ACCESS_KEY_ID="$target_ak"
-    export AWS_SECRET_ACCESS_KEY="$target_sk"
-    export AWS_DEFAULT_REGION="$region"
-    export AWS_REGION="$region"
-
-    # Check for an existing running task
-    echo "==> Checking for running bastion tasks..."
-    local existing_task
-    existing_task=$(aws ecs list-tasks --cluster "$ecs_cluster" \
-        --desired-status RUNNING --query 'taskArns[0]' --output text 2>/dev/null || true)
-
-    local task_id
-    if [[ -n "$existing_task" && "$existing_task" != "None" ]]; then
-        task_id=$(echo "$existing_task" | awk -F'/' '{print $NF}')
-        echo "==> Found existing running task: $task_id"
-    else
-        echo "==> No running task found, starting a new one..."
-
-        # Discover task definition, subnets, and security group from AWS
-        local task_def="${cluster_id}-bastion"
-        local sg_id subnets
-
-        sg_id=$(aws ec2 describe-security-groups \
-            --filters "Name=group-name,Values=${cluster_id}-bastion" \
-            --query 'SecurityGroups[0].GroupId' --output text) \
-            || die "Could not find security group '${cluster_id}-bastion'."
-        [[ "$sg_id" != "None" ]] \
-            || die "Security group '${cluster_id}-bastion' not found."
-
-        # Find private subnets tagged for the cluster's VPC
-        local vpc_id
-        vpc_id=$(aws ec2 describe-security-groups \
-            --group-ids "$sg_id" \
-            --query 'SecurityGroups[0].VpcId' --output text)
-
-        subnets=$(aws ec2 describe-subnets \
-            --filters "Name=vpc-id,Values=${vpc_id}" "Name=tag:Name,Values=*private*" \
-            --query 'Subnets[].SubnetId' --output text \
-            | tr '\t' ',') \
-            || die "Could not find private subnets in VPC $vpc_id."
-
-        echo "    Task def:  $task_def"
-        echo "    SG:        $sg_id"
-        echo "    Subnets:   $subnets"
-
-        AWS_PAGER="" aws ecs run-task \
-            --cluster "$ecs_cluster" \
-            --task-definition "$task_def" \
-            --launch-type FARGATE \
-            --enable-execute-command \
-            --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$sg_id],assignPublicIp=DISABLED}" \
-            > /dev/null
-
-        task_id=$(aws ecs list-tasks --cluster "$ecs_cluster" \
-            --query 'taskArns[0]' --output text | awk -F'/' '{print $NF}')
-    fi
-
-    # Wait for task to be running
-    echo "==> Waiting for task to be running..."
-    aws ecs wait tasks-running --cluster "$ecs_cluster" --tasks "$task_id"
-
-    # Wait for the ECS exec agent to be ready
-    echo "==> Waiting for execute command agent..."
-    local agent_status=""
-    for i in $(seq 1 30); do
-        agent_status=$(aws ecs describe-tasks \
-            --cluster "$ecs_cluster" --tasks "$task_id" --output json \
-            | jq -r '.tasks[0].containers[] | select(.name=="bastion") | .managedAgents[] | select(.name=="ExecuteCommandAgent") | .lastStatus' 2>/dev/null || true)
-        if [[ "$agent_status" == "RUNNING" ]]; then
-            break
-        fi
-        sleep 2
-    done
-    [[ "$agent_status" == "RUNNING" ]] \
-        || die "Execute command agent did not become ready (status: ${agent_status:-unknown})"
-
+    ## Leave these here so we can ensure that the variables
+    ## are actually available since we refactored out the logic
     echo ""
     echo "==> Bastion task ready"
     echo "    ECS cluster: $ecs_cluster"
@@ -567,6 +578,216 @@ cmd_bastion() {
         --container bastion \
         --interactive \
         --command '/bin/bash'
+}
+
+cmd_bastion_port_forward() {
+    local cluster_type
+    cluster_type=$1
+
+    # --- Validations ------------------------
+    case "$cluster_type" in
+      regional|management) ;;
+      *) echo "Error: invalid cluster type '$cluster_type'"; echo ""; usage ;;
+    esac
+
+    if [ "$cluster_type" = "regional" ]; then
+        SERVICE=$(fzf_pick "Select service (${cluster_type}):" \
+        "maestro   - Maestro HTTP + gRPC" \
+        "argocd    - ArgoCD server HTTPS" \
+        "custom    - Custom service / ports")
+    else
+        SERVICE=$(fzf_pick "Select service (${cluster_type}):" \
+        "argocd      - ArgoCD server HTTPS" \
+        "prometheus  - Prometheus Monitoring Dashboard" \
+        "custom      - Custom service / ports")
+    fi
+    SERVICE="${SERVICE%%[[:space:]]*}"
+
+    case "$SERVICE" in
+    maestro|argocd|prometheus|custom) ;;
+    *) echo "Error: unknown service '$SERVICE'" ;;
+    esac
+
+    if [ "$SERVICE" = "maestro" ] && [ "$CLUSTER_TYPE" != "regional" ]; then
+      echo "Error: maestro is only available on regional clusters."
+      exit 1
+    fi
+
+    # ── Build port-forward definitions ───────────────────────────────────────────
+    # Each entry: "label remote_port local_port k8s_svc k8s_namespace k8s_svc_port"
+
+    case "$SERVICE" in
+    maestro)
+        FORWARDS=(
+        "Maestro-HTTP 8080 8080 maestro-http maestro-server 8080"
+        "Maestro-gRPC 8090 8090 maestro-grpc maestro-server 8090"
+        )
+        ;;
+    argocd)
+        FORWARDS=(
+        "ArgoCD-Server 8443 8443 argocd-server argocd 443"
+        )
+        ;;
+    prometheus)
+        FORWARDS=(
+        "Prometheus 9090 9090 monitoring-prometheus monitoring 9090"
+        )
+        ;;
+    custom)
+        echo ""
+        read -rp "Kubernetes namespace: " K8S_NS
+        read -rp "Service name (without svc/ prefix): " K8S_SVC
+        read -rp "Service port [443]: " K8S_SVC_PORT
+        K8S_SVC_PORT="${K8S_SVC_PORT:-443}"
+        read -rp "Local port [${K8S_SVC_PORT}]: " LOCAL_PORT
+        LOCAL_PORT="${LOCAL_PORT:-$K8S_SVC_PORT}"
+        REMOTE_PORT="$LOCAL_PORT"
+
+        FORWARDS=(
+        "Custom ${REMOTE_PORT} ${LOCAL_PORT} ${K8S_SVC} ${K8S_NS} ${K8S_SVC_PORT}"
+        )
+        ;;
+    esac
+
+    # ── Pre-flight: check local ports are free ───────────────────────────────────
+
+    for entry in "${FORWARDS[@]}"; do
+      read -r label _ local_port _ _ _ <<< "$entry"
+      if lsof -iTCP:"$local_port" -sTCP:LISTEN -t &>/dev/null; then
+        echo "Error: Local port ${local_port} (${label}) is already in use."
+        echo "Kill the process using it first: lsof -iTCP:${local_port} -sTCP:LISTEN"
+        exit 1
+      fi
+    done
+
+    # ── Connect to Bastion ──────────────────────────────────────────────────────
+
+    bastion_setup $1
+
+    local runtime_id
+    runtime_id=$(aws ecs describe-tasks \
+      --cluster "$ecs_cluster" \
+      --tasks "$task_id" \
+      --query 'tasks[0].containers[?name==`bastion`].runtimeId | [0]' \
+      --output text)
+
+    if [[ -z "$runtime_id" || "$runtime_id" == "None" ]]; then
+      echo "Error: runtime_id not found for task '$task_id' in cluster '$ecs_cluster'"
+      exit 1
+    fi
+
+    ## Leave these here so we can ensure that the variables
+    ## are actually available since we refactored out the logic
+    echo ""
+    echo "==> Bastion task ready"
+    echo "    ECS cluster: $ecs_cluster"
+    echo "    Task ID:     $task_id"
+    echo ""
+    echo "==> Connecting to bastion..."
+    echo ""
+
+    # ── Port forwarding ─────────────────────────────────────────────────────────
+
+    SSM_PIDS=()
+
+    cleanup() {
+    echo ""
+    echo "Stopping all port-forward sessions..."
+    for pid in "${SSM_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    }
+    trap cleanup EXIT
+
+    TARGET="ecs:${ecs_cluster}_${task_id}_${runtime_id}"
+
+    # Kill stale port-forwards on bastion
+    echo "==> Cleaning up stale port-forwards on bastion..."
+    aws ecs execute-command \
+    --cluster "$ecs_cluster" \
+    --task "$task_id" \
+    --container bastion \
+    --interactive \
+    --command "pkill -f kubectl.port-forward || true" &>/dev/null || true
+    sleep 2
+
+    # Start kubectl port-forward(s) inside the bastion (one ECS exec per forward).
+    # The ECS exec session is short-lived but kubectl keeps running in the container.
+    for entry in "${FORWARDS[@]}"; do
+    read -r label remote_port local_port k8s_svc k8s_ns k8s_svc_port <<< "$entry"
+
+    echo "==> [bastion] kubectl port-forward svc/${k8s_svc} ${remote_port}:${k8s_svc_port} -n ${k8s_ns}"
+    aws ecs execute-command \
+        --cluster "$ecs_cluster" \
+        --task "$task_id" \
+        --container bastion \
+        --interactive \
+        --command "kubectl port-forward svc/${k8s_svc} ${remote_port}:${k8s_svc_port} -n ${k8s_ns} --address 0.0.0.0" &
+    done
+    # Not tracked in SSM_PIDS — the ECS exec processes are expected to exit
+
+    # Wait for kubectl to bind inside the bastion
+    echo ""
+    echo "==> Waiting for kubectl port-forward(s) to be ready..."
+    sleep 5
+
+    # Hop 2: SSM port forward from laptop to bastion
+    for entry in "${FORWARDS[@]}"; do
+    read -r label remote_port local_port _ _ _ <<< "$entry"
+
+    echo "==> [local] SSM forwarding ${label} (localhost:${local_port} -> bastion:${remote_port})..."
+    aws ssm start-session \
+        --target "$TARGET" \
+        --document-name AWS-StartPortForwardingSession \
+        --parameters "{\"portNumber\":[\"${remote_port}\"],\"localPortNumber\":[\"${local_port}\"]}" &
+    SSM_PIDS+=($!)
+    done
+
+    echo ""
+    echo "==> Port forwarding active. Forwarded ports:"
+    for entry in "${FORWARDS[@]}"; do
+    read -r label _ local_port _ _ _ <<< "$entry"
+    echo "    ${label}: localhost:${local_port}"
+    done
+
+    # For ArgoCD, fetch and display the admin password from the bastion.
+    # Use a marker prefix so we can extract the password from the SSM session noise.
+    if [ "$SERVICE" = "argocd" ]; then
+    echo ""
+    echo "==> Fetching ArgoCD admin password..."
+    PASS_OUTPUT=$(aws ecs execute-command \
+        --cluster "$ecs_cluster" \
+        --task "$task_id" \
+        --container bastion \
+        --interactive \
+        --command "sh -c \"echo ARGOCD_PW=\$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath={.data.password} | base64 -d)\"" 2>/dev/null || true)
+    ARGOCD_PASS=$(echo "$PASS_OUTPUT" | grep -o 'ARGOCD_PW=.*' | cut -d= -f2 | tr -d '[:space:]')
+    echo ""
+    echo "    ArgoCD UI:       https://localhost:8443"
+    echo "    Username:        admin"
+    if [ -n "$ARGOCD_PASS" ]; then
+        echo "    Password:        ${ARGOCD_PASS}"
+    else
+        echo "    Password:        (could not retrieve - run on bastion manually):"
+        echo "                     kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath={.data.password} | base64 -d"
+    fi
+    fi
+
+    echo ""
+    echo "Press Ctrl+C to stop."
+
+    # Wait for any SSM session to exit — if one dies, tear everything down
+    while true; do
+    for pid in "${SSM_PIDS[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        echo ""
+        echo "Error: SSM port-forward session (PID $pid) exited unexpectedly."
+        exit 1
+        fi
+    done
+    sleep 2
+    done
 }
 
 cmd_e2e() {
@@ -632,22 +853,24 @@ case "${1:-help}" in
 esac
 
 case "${1:-help}" in
-    provision) cmd_provision ;;
-    teardown)  cmd_teardown ;;
-    resync)    cmd_resync ;;
-    shell)     cmd_shell ;;
-    bastion)   cmd_bastion "$2" ;;
-    e2e)       cmd_e2e ;;
+    provision)      cmd_provision ;;
+    teardown)       cmd_teardown ;;
+    resync)         cmd_resync ;;
+    shell)          cmd_shell ;;
+    bastion)        cmd_bastion_interactive "$2" ;;
+    port-forward)   cmd_bastion_port_forward "$2" ;;
+    e2e)            cmd_e2e ;;
     help|*)
         echo "Usage: $0 <command>"
         echo ""
         echo "Commands:"
-        echo "  provision   Provision an ephemeral environment"
-        echo "  teardown    Tear down an ephemeral environment"
-        echo "  resync      Resync an ephemeral environment to your branch"
-        echo "  list        List ephemeral environments"
-        echo "  shell       Interactive shell for Platform API access"
-        echo "  bastion     Connect to RC/MC bastion in an ephemeral env"
-        echo "  e2e         Run e2e tests against an ephemeral env"
+        echo "  provision       Provision an ephemeral environment"
+        echo "  teardown        Tear down an ephemeral environment"
+        echo "  resync          Resync an ephemeral environment to your branch"
+        echo "  list            List ephemeral environments"
+        echo "  shell           Interactive shell for Platform API access"
+        echo "  bastion         Connect to RC/MC bastion in an ephemeral env"
+        echo "  port-forward    Forward ports through RC/MC bastion in an ephemeral env"
+        echo "  e2e             Run e2e tests against an ephemeral env"
         ;;
 esac
