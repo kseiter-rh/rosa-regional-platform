@@ -161,19 +161,13 @@ validate_cluster_type() {
     cluster_type=$1
     case "$cluster_type" in
       regional|management) ;;
-      *) echo "Error: invalid cluster type '$cluster_type'"; echo ""; usage ;;
+      *) echo "Error: invalid cluster type '$cluster_type'"; echo ""; usage; exit 1 ;;
     esac
 }
 
 # Initial bastion connectivity and setup
 bastion_setup() {
     local cluster_type="${1:-}"
-
-    # Validate cluster type
-    case "$cluster_type" in
-        regional|management) ;;
-        *) die "Usage: $0 bastion <regional|management>" ;;
-    esac
 
     # Select environment (ready only)
     select_env "STATE=ready" \
@@ -626,7 +620,7 @@ cmd_bastion_port_forward() {
 
     case "$service" in
     maestro|argocd|prometheus|custom) ;;
-    *) echo "Error: unknown service '$service'"; echo ""; usage ;;
+    *) echo "Error: unknown service '$service'"; echo ""; usage; exit 1 ;;
     esac
 
     if [ "$service" = "maestro" ] && [ "$cluster_type" != "regional" ]; then
