@@ -2,7 +2,7 @@
 
 ## Overview
 
-Each cluster's ArgoCD is configured to use the ApplicationSet at `argocd/config/applicationset/base-applicationset.yaml` as its entrypoint. This ApplicationSet can be configured in two ways:
+Each cluster's ArgoCD is configured to use a rendered ApplicationSet from `config/templates/argocd-bootstrap/applicationset.yaml.j2` as its entrypoint. This ApplicationSet can be configured in two ways:
 
 1. **Live Config**: Uses Helm charts from `argocd/config/<cluster_type>/` and `argocd/config/shared/` directly from the current git revision (main branch or your development branch passed during cluster provisioning)
 
@@ -13,8 +13,6 @@ Each cluster's ArgoCD is configured to use the ApplicationSet at `argocd/config/
 ```
 argocd/
 ├── config/
-│   ├── applicationset/
-│   │   └── base-applicationset.yaml     # ApplicationSet entrypoint
 │   ├── shared/                          # Shared charts (ArgoCD, etc.)
 │   ├── management-cluster/              # MC-specific charts
 │   └── regional-cluster/                # RC-specific charts
