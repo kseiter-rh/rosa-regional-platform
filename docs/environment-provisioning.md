@@ -160,8 +160,10 @@ NAMESPACE   NAME                SYNC STATUS   HEALTH STATUS
 argocd      argocd              Synced        Healthy
 argocd      hyperfleet-system   Synced        Healthy
 argocd      maestro-server      Synced        Healthy
+argocd      monitoring          Synced        Healthy
 argocd      platform-api        Synced        Healthy
 argocd      root                Synced        Healthy
+argocd      storageclass        Synced        Healthy
 ```
 
 From the Management Cluster bastion:
