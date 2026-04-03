@@ -24,7 +24,7 @@
         "type": "query",
         "label": "HCP Namespace",
         "datasource": { "type": "prometheus", "uid": "${datasource}" },
-        "query": "label_values(apiserver_request_total{namespace=~\"clusters-.*\"}, namespace)",
+        "query": "label_values(apiserver_storage_objects{namespace=~\"clusters-.*\"}, namespace)",
         "refresh": 2,
         "multi": false,
         "includeAll": true,
@@ -433,7 +433,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(increase(etcd_server_leader_changes_seen_total{namespace=~\"$namespace\"}[1h]))",
+          "expr": "sum(max by (namespace) (increase(etcd_server_leader_changes_seen_total{namespace=~\"$namespace\"}[1h])))",
           "legendFormat": "changes"
         }
       ],
@@ -493,7 +493,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * max(etcd_mvcc_db_total_size_in_use_in_bytes{namespace=~\"$namespace\"}) / max(etcd_mvcc_db_total_size_in_bytes{namespace=~\"$namespace\"})",
+          "expr": "max(100 * etcd_mvcc_db_total_size_in_use_in_bytes{namespace=~\"$namespace\"} / etcd_mvcc_db_total_size_in_bytes{namespace=~\"$namespace\"})",
           "legendFormat": "used %"
         }
       ],
